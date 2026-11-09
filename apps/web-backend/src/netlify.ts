@@ -92,14 +92,14 @@ function gzipJson(req: Request, res: Response, next: NextFunction): void {
         ) {
             res.setHeader('Content-Encoding', 'gzip');
             res.setHeader('Vary', 'Accept-Encoding');
-            return send(gzipSync(body as string));
+            return send(gzipSync(body as string, { level: 9 }));
         }
         return send(body as never);
     }) as typeof res.send;
     next();
 }
 
-// Requests arrive as /api/<route> (redirect) or /.netlify/functions/api/<route>.
+// Requests arrive as /api/<route>.
 const strip = (req: Request, _res: Response, next: NextFunction) => {
     req.url =
         req.url.replace(/^\/(?:\.netlify\/functions\/api|api)(?=\/|\?|$)/, '') ||
@@ -124,7 +124,74 @@ const app = express();
 app.disable('x-powered-by');
 app.use(strip, gzipJson, backend);
 
-export const handler = serverless(app as never, {
+const lambda = serverless(app as never, {
     binary: (headers: Record<string, unknown>) =>
         String(headers['content-encoding'] ?? '') === 'gzip',
 });
+
+interface LambdaResult {
+    statusCode: number;
+    headers?: Record<string, string | number | boolean>;
+    multiValueHeaders?: Record<string, (string | number | boolean)[]>;
+    body?: string;
+    isBase64Encoded?: boolean;
+}
+
+/**
+ * Netlify Functions v2 entry. The body goes back as a stream: a buffered
+ * function response is capped at 6 MB, a streamed one at 20 MB, and large
+ * Xtream catalogs (get_vod_streams, get_series) exceed the first.
+ */
+export default async function handler(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const query: Record<string, string> = {};
+    const multi: Record<string, string[]> = {};
+    url.searchParams.forEach((value, key) => {
+        query[key] = value;
+        (multi[key] ??= []).push(value);
+    });
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, key) => (headers[key] = value));
+    const raw =
+        request.method === 'GET' || request.method === 'HEAD'
+            ? null
+            : Buffer.from(await request.arrayBuffer());
+
+    const result = (await lambda(
+        {
+            httpMethod: request.method,
+            path: url.pathname,
+            headers,
+            queryStringParameters: Object.keys(query).length ? query : null,
+            multiValueQueryStringParameters: Object.keys(multi).length ? multi : null,
+            body: raw && raw.length ? raw.toString('base64') : null,
+            isBase64Encoded: Boolean(raw && raw.length),
+        },
+        {}
+    )) as LambdaResult;
+
+    const out = new Headers();
+    for (const [k, v] of Object.entries(result.headers ?? {})) out.set(k, String(v));
+    for (const [k, vs] of Object.entries(result.multiValueHeaders ?? {}))
+        for (const v of vs) out.append(k, String(v));
+    out.delete('content-length');
+
+    const bytes = Buffer.from(
+        result.body ?? '',
+        result.isBase64Encoded ? 'base64' : 'utf8'
+    );
+    const body =
+        request.method === 'HEAD' || result.statusCode === 204 || result.statusCode === 304
+            ? null
+            : new ReadableStream<Uint8Array>({
+                  start(controller) {
+                      const chunk = 256 * 1024;
+                      for (let i = 0; i < bytes.length; i += chunk)
+                          controller.enqueue(new Uint8Array(bytes.subarray(i, i + chunk)));
+                      controller.close();
+                  },
+              });
+    return new Response(body, { status: result.statusCode, headers: out });
+}
+
+export const config = { path: ['/api', '/api/*'] };
