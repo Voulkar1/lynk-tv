@@ -87,7 +87,7 @@
         "entitlementsInherit": "apps/electron-backend/macos/entitlements.mac.inherit.plist",
         "notarize": false,
         "icon": "apps/web/src/assets/icons/favicon.icns",
-        "identity": null
+        "identity": "-"
     },
     "linux": {
         "category": "Video",

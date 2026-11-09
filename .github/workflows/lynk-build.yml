@@ -44,6 +44,12 @@ jobs:
                   IPTVNATOR_REQUIRE_EMBEDDED_MPV: '0'
                   NX_NO_CLOUD: 'true'
               run: pnpm run make:app -- --publishPolicy=never
+            - name: Check the app signature (ad-hoc)
+              run: |
+                  APP=$(find dist/executables -maxdepth 2 -name "*.app" | head -1)
+                  echo "Checking $APP"
+                  codesign --verify --deep --strict --verbose=2 "$APP"
+                  codesign -dv "$APP" 2>&1 | grep -E "Signature|Identifier"
             - uses: actions/upload-artifact@v4
               with:
                   name: lynk-tv-mac-${{ matrix.arch }}
