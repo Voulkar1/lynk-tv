@@ -17,7 +17,11 @@ import {
 } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import serverless from 'serverless-http';
-import express, { type NextFunction, type Request, type Response } from 'express';
+import express, {
+    type NextFunction,
+    type Request as ExpressRequest,
+    type Response as ExpressResponse,
+} from 'express';
 import { ProviderTargetRegistry } from './app/provider-target-registry';
 import { createWebBackendApp } from './app/web-backend-app';
 
@@ -77,7 +81,11 @@ const backend = createWebBackendApp({
  * Netlify caps a function response at 6 MB, so JSON (large parsed
  * playlists) is gzipped when the browser accepts it.
  */
-function gzipJson(req: Request, res: Response, next: NextFunction): void {
+function gzipJson(
+    req: ExpressRequest,
+    res: ExpressResponse,
+    next: NextFunction
+): void {
     if (!/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
         next();
         return;
@@ -100,7 +108,11 @@ function gzipJson(req: Request, res: Response, next: NextFunction): void {
 }
 
 // Requests arrive as /api/<route>.
-const strip = (req: Request, _res: Response, next: NextFunction) => {
+const strip = (
+    req: ExpressRequest,
+    _res: ExpressResponse,
+    next: NextFunction
+) => {
     req.url =
         req.url.replace(/^\/(?:\.netlify\/functions\/api|api)(?=\/|\?|$)/, '') ||
         '/';
