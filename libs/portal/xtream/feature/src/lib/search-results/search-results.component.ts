@@ -1,0 +1,589 @@
+import {
+    AfterViewInit,
+    ChangeDetectionStrategy,
+    Component,
+    computed,
+    effect,
+    inject,
+    input,
+    linkedSignal,
+    signal,
+    untracked,
+} from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatIcon } from '@angular/material/icon';
+import { MatProgressSpinner } from '@angular/material/progress-spinner';
+import { ActivatedRoute, Router } from '@angular/router';
+import { TranslatePipe } from '@ngx-translate/core';
+import { DatabaseService } from '@iptvnator/services';
+import { ContentCardComponent } from '@iptvnator/portal/shared/ui';
+import { SearchLayoutComponent } from '@iptvnator/portal/shared/ui';
+import { WorkspaceBackNavigationService } from '@iptvnator/portal/shared/data-access';
+import {
+    buildXtreamNavigationTarget,
+    queryParamSignal,
+    workspacePortalCommands,
+} from '@iptvnator/portal/shared/util';
+import { createLogger } from '@iptvnator/portal/shared/util';
+import { SearchFilters } from '@iptvnator/portal/xtream/data-access';
+import { XtreamStore } from '@iptvnator/portal/xtream/data-access';
+import {
+    ContentType,
+    XtreamSearchResultItem,
+} from '@iptvnator/portal/xtream/data-access';
+import {
+    GLOBAL_SEARCH_MIN_LENGTH,
+    GlobalSearchResult,
+    isM3uGlobalSearchResult,
+} from '@iptvnator/shared/interfaces';
+
+import {
+    type AdditionalGlobalSearchResult,
+    type GlobalSearchCard,
+    groupResultsByPlaylistId,
+} from './global-search-results';
+
+export type { AdditionalGlobalSearchResult } from './global-search-results';
+
+const GLOBAL_SEARCH_PAGE_SIZE = 100;
+
+/**
+ * Render window for the in-portal (single playlist) search, which receives its
+ * complete result set in one response. The window grows via the layout's
+ * `nearEnd` scroll hook, mirroring the global search's paged appends.
+ */
+const IN_PORTAL_RESULTS_CHUNK = 60;
+
+@Component({
+    selector: 'app-search-results',
+    changeDetection: ChangeDetectionStrategy.OnPush,
+    imports: [
+        ContentCardComponent,
+        FormsModule,
+        MatButtonModule,
+        MatCheckboxModule,
+        MatIcon,
+        MatProgressSpinner,
+        SearchLayoutComponent,
+        TranslatePipe,
+    ],
+    providers: [],
+    templateUrl: './search-results.component.html',
+    styleUrls: ['./search-results.component.scss'],
+})
+export class SearchResultsComponent implements AfterViewInit {
+    readonly xtreamStore = inject(XtreamStore);
+    readonly router = inject(Router);
+    readonly activatedRoute = inject(ActivatedRoute);
+    readonly databaseService = inject(DatabaseService);
+    private readonly backNavigation = inject(WorkspaceBackNavigationService);
+    private readonly logger = createLogger('XtreamSearchResults');
+    readonly routeSearchTerm = queryParamSignal(
+        this.activatedRoute,
+        'q',
+        (value) => (value ?? '').trim()
+    );
+
+    /** Search term from store */
+    readonly searchTerm = this.xtreamStore.searchTerm;
+
+    /** Search filters from store */
+    readonly filters = this.xtreamStore.searchFilters;
+    private globalSearchRequestVersion = 0;
+    private lastGlobalSearchTerm = '';
+    private lastGlobalSearchTypes: string[] = [];
+    private lastGlobalSearchExcludeHidden?: boolean;
+    readonly hasMoreGlobalResults = signal(false);
+    readonly isLoadingMoreGlobalResults = signal(false);
+
+    private static readonly GROUP_BY_STORAGE_KEY =
+        'global-search-group-by-playlist';
+    private static readonly EXCLUDE_HIDDEN_STORAGE_KEY =
+        'xtream-search-exclude-hidden';
+    private static readonly TYPE_FILTERS_STORAGE_KEY =
+        'global-search-type-filters';
+
+    readonly isGlobalSearch =
+        this.activatedRoute.snapshot.data?.['isGlobalSearch'] === true;
+
+    /** Nothing of the portal's catalog is loading or importing any more. */
+    private readonly isCatalogReady = computed(
+        () =>
+            !this.xtreamStore.isLoadingContent() &&
+            !this.xtreamStore.isLoadingCategories() &&
+            !this.xtreamStore.isImporting()
+    );
+
+    /** Whether to group global search results by playlist */
+    readonly groupByPlaylist = signal(
+        localStorage.getItem(SearchResultsComponent.GROUP_BY_STORAGE_KEY) !==
+            'false'
+    );
+
+    /** Whether to exclude content from hidden categories */
+    readonly excludeHidden = signal(
+        localStorage.getItem(
+            SearchResultsComponent.EXCLUDE_HIDDEN_STORAGE_KEY
+        ) === 'true'
+    );
+
+    readonly filterConfig = [
+        {
+            key: 'live' as keyof SearchFilters,
+            label: 'Live TV',
+            translationKey: 'PORTALS.SIDEBAR.LIVE_TV',
+        },
+        {
+            key: 'movie' as keyof SearchFilters,
+            label: 'Movies',
+            translationKey: 'PORTALS.SIDEBAR.MOVIES',
+        },
+        {
+            key: 'series' as keyof SearchFilters,
+            label: 'Series',
+            translationKey: 'PORTALS.SIDEBAR.SERIES',
+        },
+    ];
+
+    readonly additionalResults = input<readonly AdditionalGlobalSearchResult[]>(
+        []
+    );
+    readonly additionalSearchPending = input(false);
+    readonly additionalSearchFailed = input(false);
+    readonly globalResults = computed<readonly GlobalSearchCard[]>(() => [
+        ...(this.xtreamStore.isSearching()
+            ? []
+            : this.xtreamStore.searchResults()),
+        ...this.additionalResults(),
+    ]);
+    readonly groupedResults = computed(() =>
+        groupResultsByPlaylistId(this.globalResults())
+    );
+
+    /** Resets to the first chunk whenever a new result set replaces the old. */
+    private readonly inPortalVisibleCount = linkedSignal({
+        source: () => this.xtreamStore.searchResults(),
+        computation: () => IN_PORTAL_RESULTS_CHUNK,
+    });
+
+    /** Windowed slice of the in-portal search results. */
+    readonly visibleInPortalResults = computed(() =>
+        this.xtreamStore.searchResults().slice(0, this.inPortalVisibleCount())
+    );
+
+    /**
+     * Feeds the search layout's infinite scroll so its auto-fill can reveal
+     * further chunks even when the rendered ones do not overflow the viewport.
+     */
+    readonly hasMoreSearchResults = computed(() =>
+        this.isGlobalSearch
+            ? this.hasMoreGlobalResults()
+            : this.xtreamStore.searchResults().length >
+              this.inPortalVisibleCount()
+    );
+
+    readonly isAppendingSearchResults = computed(
+        () => this.isGlobalSearch && this.isLoadingMoreGlobalResults()
+    );
+
+    /**
+     * RENDERED result count for the layout's overflow re-measure: the
+     * windowed slice for in-portal mode (grows chunk by chunk), the full
+     * loaded set for global mode (server pages append into it).
+     */
+    readonly renderedSearchResultsCount = computed(() =>
+        this.isGlobalSearch
+            ? this.globalResults().length
+            : this.visibleInPortalResults().length
+    );
+
+    /**
+     * Result-set identity for the layout's near-end latch and auto-fill
+     * budget. Type filters and the hidden-categories toggle replace the
+     * result set without changing the term, so they are part of the identity.
+     */
+    readonly searchResetIdentity = computed(() => {
+        const filters = this.filters();
+        return [
+            this.searchTerm(),
+            String(filters.live),
+            String(filters.movie),
+            String(filters.series),
+            String(this.excludeHidden()),
+        ].join('|');
+    });
+
+    onResultsNearEnd(): void {
+        if (this.isGlobalSearch) {
+            void this.loadMoreGlobalResults();
+            return;
+        }
+
+        const total = this.xtreamStore.searchResults().length;
+        if (this.inPortalVisibleCount() < total) {
+            this.inPortalVisibleCount.update(
+                (count) => count + IN_PORTAL_RESULTS_CHUNK
+            );
+        }
+    }
+
+    constructor() {
+        if (this.isGlobalSearch) {
+            const savedFilters = localStorage.getItem(
+                SearchResultsComponent.TYPE_FILTERS_STORAGE_KEY
+            );
+            if (savedFilters) {
+                try {
+                    const parsed = JSON.parse(
+                        savedFilters
+                    ) as Partial<SearchFilters>;
+                    this.xtreamStore.setSearchFilters({
+                        live: parsed.live !== false,
+                        movie: parsed.movie !== false,
+                        series: parsed.series !== false,
+                    });
+                } catch {
+                    // Ignore malformed storage value and keep defaults.
+                }
+            }
+        }
+
+        // Created first so a route `q` reaches the store before the search
+        // effect's first run: a term left in the store by an earlier visit
+        // must not be queried on the way to the route's term.
+        effect(() => {
+            const queryTerm = this.routeSearchTerm();
+            if (queryTerm === untracked(this.searchTerm)) {
+                return;
+            }
+
+            this.xtreamStore.setSearchTerm(queryTerm);
+        });
+
+        // One effect for both triggers, so a term and the end of catalog
+        // loading arriving in the same flush run one search, not two.
+        // - A new term runs at once: typed terms arrive already debounced by
+        //   the workspace shell (SEARCH_INPUT_DEBOUNCE_MS), and a term from
+        //   the URL or a filter change is a single deliberate change. A newer
+        //   term supersedes an older query still in flight (request versions).
+        // - A prefilled in-portal search (a reload or deep link with `q`) can
+        //   run while the portal's catalog is still loading, and the in-portal
+        //   search reads that catalog: it runs again once loading has finished.
+        let previousTerm: string | undefined;
+        let wasCatalogReady: boolean | undefined;
+        effect(() => {
+            const term = this.searchTerm();
+            const ready = this.isCatalogReady();
+            const termChanged = term !== previousTerm;
+            const becameReady =
+                wasCatalogReady === false && ready && !this.isGlobalSearch;
+            previousTerm = term;
+            wasCatalogReady = ready;
+            if (!termChanged && !becameReady) {
+                return;
+            }
+            untracked(() => {
+                if (term.length >= this.minSearchLength) {
+                    this.executeSearch();
+                } else if (termChanged) {
+                    this.clearResultsOnly();
+                }
+            });
+        });
+    }
+
+    ngAfterViewInit() {
+        this.xtreamStore.setSelectedContentType('vod');
+    }
+
+    executeSearch() {
+        const filters = this.filters();
+        const types = Object.entries(filters)
+            .filter(([, enabled]) => enabled)
+            .map(([type]) => type);
+        const excludeHidden = this.excludeHidden();
+
+        if (this.isGlobalSearch) {
+            this.searchGlobal(this.searchTerm(), types, excludeHidden);
+        } else {
+            this.xtreamStore.searchContent({
+                term: this.searchTerm(),
+                types,
+                excludeHidden,
+            });
+        }
+    }
+
+    /**
+     * Update a single filter in the store
+     */
+    updateFilter(key: keyof SearchFilters, value: boolean) {
+        this.xtreamStore.updateSearchFilter(key, value);
+
+        if (this.isGlobalSearch) {
+            localStorage.setItem(
+                SearchResultsComponent.TYPE_FILTERS_STORAGE_KEY,
+                JSON.stringify(this.xtreamStore.searchFilters())
+            );
+        }
+
+        if (this.searchTerm().length >= this.minSearchLength) {
+            this.executeSearch();
+        }
+    }
+
+    /**
+     * Clear only the results, not the search term/filters
+     */
+    private clearResultsOnly() {
+        this.globalSearchRequestVersion++;
+        this.xtreamStore.setIsSearching(false);
+        this.hasMoreGlobalResults.set(false);
+        this.isLoadingMoreGlobalResults.set(false);
+        this.lastGlobalSearchTerm = '';
+        this.lastGlobalSearchTypes = [];
+        this.lastGlobalSearchExcludeHidden = undefined;
+        this.xtreamStore.setGlobalSearchResults([]);
+    }
+
+    async searchGlobal(
+        term: string,
+        types: string[],
+        excludeHidden?: boolean,
+        append = false
+    ) {
+        const trimmedTerm =
+            term.trim() || (append ? this.lastGlobalSearchTerm : '');
+        const effectiveTypes =
+            append && this.lastGlobalSearchTypes.length > 0
+                ? this.lastGlobalSearchTypes
+                : types;
+        const effectiveExcludeHidden =
+            append && this.lastGlobalSearchExcludeHidden !== undefined
+                ? this.lastGlobalSearchExcludeHidden
+                : excludeHidden;
+
+        if (
+            trimmedTerm.length < this.minSearchLength ||
+            effectiveTypes.length === 0
+        ) {
+            this.clearResultsOnly();
+            return;
+        }
+
+        if (
+            append &&
+            (!this.hasMoreGlobalResults() ||
+                this.isLoadingMoreGlobalResults() ||
+                this.xtreamStore.isSearching() ||
+                // An append continues the LAST EXECUTED search. While an
+                // edited query is still debouncing, the visible results
+                // belong to the old term — fetching a new-term page at the
+                // old offset would interleave two different queries.
+                trimmedTerm !== this.lastGlobalSearchTerm)
+        ) {
+            return;
+        }
+
+        const requestVersion = ++this.globalSearchRequestVersion;
+        const offset = append ? this.getCurrentGlobalSearchResults().length : 0;
+
+        if (append) {
+            this.isLoadingMoreGlobalResults.set(true);
+        } else {
+            this.lastGlobalSearchTerm = trimmedTerm;
+            this.lastGlobalSearchTypes = [...effectiveTypes];
+            this.lastGlobalSearchExcludeHidden = effectiveExcludeHidden;
+            this.hasMoreGlobalResults.set(false);
+            this.isLoadingMoreGlobalResults.set(false);
+            this.xtreamStore.setIsSearching(true);
+        }
+
+        try {
+            const results = await this.databaseService.globalSearchContent(
+                trimmedTerm,
+                effectiveTypes,
+                effectiveExcludeHidden,
+                undefined,
+                {
+                    limit: GLOBAL_SEARCH_PAGE_SIZE + 1,
+                    offset,
+                }
+            );
+
+            if (requestVersion !== this.globalSearchRequestVersion) {
+                return;
+            }
+
+            if (results && Array.isArray(results)) {
+                const visibleResults = results.slice(
+                    0,
+                    GLOBAL_SEARCH_PAGE_SIZE
+                );
+                this.hasMoreGlobalResults.set(
+                    results.length > GLOBAL_SEARCH_PAGE_SIZE
+                );
+                this.xtreamStore.setGlobalSearchResults(
+                    append
+                        ? [
+                              ...this.getCurrentGlobalSearchResults(),
+                              ...visibleResults,
+                          ]
+                        : visibleResults
+                );
+            } else {
+                this.xtreamStore.setIsSearching(false);
+                this.hasMoreGlobalResults.set(false);
+            }
+        } catch (error) {
+            if (requestVersion !== this.globalSearchRequestVersion) {
+                return;
+            }
+
+            this.logger.error('Error in global search', error);
+            if (append) {
+                this.hasMoreGlobalResults.set(false);
+            } else {
+                this.xtreamStore.setSearchError();
+            }
+        } finally {
+            if (requestVersion === this.globalSearchRequestVersion) {
+                this.isLoadingMoreGlobalResults.set(false);
+                if (!append) {
+                    this.xtreamStore.setIsSearching(false);
+                }
+            }
+        }
+    }
+
+    async loadMoreGlobalResults(): Promise<void> {
+        if (!this.isGlobalSearch) {
+            return;
+        }
+
+        const filters = this.filters();
+        const types = Object.entries(filters)
+            .filter(([, enabled]) => enabled)
+            .map(([type]) => type);
+
+        await this.searchGlobal(
+            this.searchTerm(),
+            types,
+            this.excludeHidden(),
+            true
+        );
+    }
+
+    selectItem(item: GlobalSearchCard) {
+        if ('open' in item) {
+            item.open();
+            return;
+        }
+        if (isM3uGlobalSearchResult(item as GlobalSearchResult)) {
+            this.selectM3uItem(item as GlobalSearchResult);
+            return;
+        }
+
+        const playlistId = item.playlist_id ?? this.xtreamStore.playlistId();
+        if (!playlistId) {
+            return;
+        }
+
+        const type = (item.type === 'movie' ? 'vod' : item.type) as ContentType;
+        const navigationType =
+            item.type === 'movie'
+                ? 'movie'
+                : item.type === 'series'
+                  ? 'series'
+                  : 'live';
+        this.xtreamStore.setSelectedContentType(type);
+
+        const navigation = buildXtreamNavigationTarget({
+            playlistId,
+            type: navigationType,
+            categoryId: item.category_id,
+            itemId: item.xtream_id,
+            title: item.title,
+            imageUrl: item.poster_url,
+        });
+
+        void this.router.navigate(navigation.link, {
+            state: navigation.state,
+        });
+    }
+
+    /** History Back; the portal's default section when it opened the session. */
+    goBack(): void {
+        this.backNavigation.back(() =>
+            workspacePortalCommands(this.activatedRoute, 'xtreams')
+        );
+    }
+
+    toggleGroupByPlaylist(value: boolean) {
+        this.groupByPlaylist.set(value);
+        localStorage.setItem(
+            SearchResultsComponent.GROUP_BY_STORAGE_KEY,
+            String(value)
+        );
+    }
+
+    toggleExcludeHidden(value: boolean) {
+        this.excludeHidden.set(value);
+        localStorage.setItem(
+            SearchResultsComponent.EXCLUDE_HIDDEN_STORAGE_KEY,
+            String(value)
+        );
+        if (this.searchTerm().length >= this.minSearchLength) {
+            this.executeSearch();
+        }
+    }
+
+    /**
+     * The in-portal search is a nested view (reached from the toolbar
+     * search box or an actor page), so it offers the header's Back; the
+     * global search is a top-level sidebar destination.
+     */
+    get backAvailable(): boolean {
+        return !this.isGlobalSearch;
+    }
+
+    get minSearchLength(): number {
+        return this.isGlobalSearch ? GLOBAL_SEARCH_MIN_LENGTH : 3;
+    }
+
+    get initialDescriptionKey(): string {
+        return this.isGlobalSearch
+            ? 'PORTALS.SEARCH_VIEW.GLOBAL_INITIAL_DESCRIPTION'
+            : 'PORTALS.SEARCH_VIEW.INITIAL_DESCRIPTION';
+    }
+
+    getDisplayType(item: GlobalSearchCard): string {
+        const result = item as GlobalSearchResult;
+        if (isM3uGlobalSearchResult(result) && result.radio === 'true') {
+            return 'radio';
+        }
+
+        return item.type;
+    }
+
+    private getCurrentGlobalSearchResults(): GlobalSearchResult[] {
+        return this.xtreamStore.searchResults() as GlobalSearchResult[];
+    }
+
+    private selectM3uItem(item: GlobalSearchResult): void {
+        if (!isM3uGlobalSearchResult(item)) {
+            return;
+        }
+
+        void this.router.navigate(
+            ['/workspace', 'playlists', item.playlist_id, 'all'],
+            {
+                state: {
+                    openM3uChannelUrl: item.stream_url,
+                },
+            }
+        );
+    }
+}

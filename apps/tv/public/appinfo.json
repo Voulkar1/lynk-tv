@@ -1,0 +1,13 @@
+{
+    "id": "com.lynkts.lynktv",
+    "version": "0.1.25",
+    "vendor": "LYNK Technology & Systems",
+    "type": "web",
+    "main": "index.html",
+    "title": "LYNK TV",
+    "icon": "icon.png",
+    "largeIcon": "large-icon.png",
+    "resolution": "1920x1080",
+    "disableBackHistoryAPI": true,
+    "requiredACG": []
+}

@@ -1,0 +1,61 @@
+diff --git a/out/codeSign/macCodeSign.js b/out/codeSign/macCodeSign.js
+index 9a69042fd48f4759a1c697bf23fa5b44f2da2366..193f42a8c4cb95ded694ba8ec0c27a5dcc94ed4c 100644
+--- a/out/codeSign/macCodeSign.js
++++ b/out/codeSign/macCodeSign.js
+@@ -156,16 +156,18 @@ async function createKeychain({ tmpDir, cscLink, cscKeyPassword, cscILink, cscIK
+     if (cscIKeyPassword != null) {
+         cscPasswords.push(cscIKeyPassword);
+     }
+-    return await importCerts(keychainFile, certPaths, cscPasswords);
++    return await importCerts(keychainFile, certPaths, cscPasswords, keychainPassword);
+ }
+-async function importCerts(keychainFile, paths, keyPasswords) {
++async function importCerts(keychainFile, paths, keyPasswords, keychainPassword) {
+     var _a;
+     for (let i = 0; i < paths.length; i++) {
+         const password = (_a = keyPasswords[i]) !== null && _a !== void 0 ? _a : "";
+         await (0, builder_util_1.exec)("/usr/bin/security", ["import", paths[i], "-k", keychainFile, "-T", "/usr/bin/codesign", "-T", "/usr/bin/productbuild", "-P", password]);
+         // https://stackoverflow.com/questions/39868578/security-codesign-in-sierra-keychain-ignores-access-control-settings-and-ui-p
+         // https://github.com/electron-userland/electron-packager/issues/701#issuecomment-322315996
+-        await (0, builder_util_1.exec)("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychainFile]);
++        // `-k` expects the keychain's own unlock password (as used by create-keychain/unlock-keychain above),
++        // not the imported item's password used by `security import -P`.
++        await (0, builder_util_1.exec)("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", keychainPassword, keychainFile]);
+     }
+     return {
+         keychainFile,
+diff --git a/out/util/electronGet.js b/out/util/electronGet.js
+--- a/out/util/electronGet.js
++++ b/out/util/electronGet.js
+@@ -318,6 +318,31 @@
+         },
+     };
+     const configWithProgress = { ...config, downloadOptions };
++    if (process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN && config.downloader == null) {
++        const { execFile } = require("node:child_process");
++        const { promisify } = require("node:util");
++        const { getDownloaderForSystem } = require("@electron/get/dist/cjs/downloader-resolver");
++        configWithProgress.downloader = {
++            async download(url, destination, options) {
++                const asset = url.match(/^https:\/\/github\.com\/(electron-userland\/electron-builder-binaries|electron\/electron)\/releases\/download\/([a-zA-Z0-9_.@%+-]+)\/([a-zA-Z0-9_.@+-]+)$/);
++                if (asset != null) {
++                    const [, repository, tag, filename] = asset;
++                    try {
++                        await promisify(execFile)("gh", [
++                            "release", "download", decodeURIComponent(tag), "--repo", repository,
++                            "--pattern", filename, "--output", destination,
++                        ], { timeout: 180000 });
++                        return;
++                    } catch (error) {
++                        await fs.rm(destination, { force: true });
++                        builder_util_1.log.warn({ file: filename, error: error.message }, "release asset API failed; trying public download");
++                    }
++                }
++                const downloader = await getDownloaderForSystem();
++                await downloader.download(url, destination, options);
++            },
++        };
++    }
+     try {
+         let filePath;
+         try {

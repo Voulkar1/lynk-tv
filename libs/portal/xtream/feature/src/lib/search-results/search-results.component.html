@@ -1,0 +1,212 @@
+<!-- Poster results: the next chunk is asked for two rows (~303 px each) ahead. -->
+<app-search-layout
+    [nearEndThresholdPx]="640"
+    [searchTerm]="searchTerm()"
+    [resultsCount]="
+        isGlobalSearch
+            ? globalResults().length
+            : xtreamStore.searchResults().length
+    "
+    [isLoading]="
+        isGlobalSearch
+            ? globalResults().length === 0 &&
+              (xtreamStore.isSearching() || additionalSearchPending())
+            : xtreamStore.isSearching()
+    "
+    [hasError]="
+        xtreamStore.searchError() &&
+        (!isGlobalSearch || globalResults().length === 0)
+    "
+    [hideEmpty]="isGlobalSearch && additionalSearchFailed()"
+    (retryClick)="executeSearch()"
+    [backAvailable]="backAvailable"
+    [showResultsCount]="!isGlobalSearch || !groupByPlaylist()"
+    [minSearchLength]="minSearchLength"
+    [initialDescriptionKey]="initialDescriptionKey"
+    [nearEndHasMore]="hasMoreSearchResults()"
+    [nearEndAppending]="isAppendingSearchResults()"
+    [nearEndRenderedCount]="renderedSearchResultsCount()"
+    [nearEndResetKey]="searchResetIdentity()"
+    (backClick)="goBack()"
+    (nearEnd)="onResultsNearEnd()"
+>
+    <!-- Type filters -->
+    <ng-container filters>
+        @if (!isGlobalSearch) {
+            @for (filter of filterConfig; track filter.key) {
+                <mat-checkbox
+                    [ngModel]="filters()[filter.key]"
+                    (ngModelChange)="updateFilter(filter.key, $event)"
+                >
+                    {{ filter.translationKey | translate }}
+                </mat-checkbox>
+            }
+        }
+    </ng-container>
+
+    <ng-container header-actions>
+        @if (!isGlobalSearch) {
+            <mat-checkbox
+                [ngModel]="excludeHidden()"
+                (ngModelChange)="toggleExcludeHidden($event)"
+            >
+                {{ 'PORTALS.SEARCH_VIEW.VISIBLE_CATEGORIES_ONLY' | translate }}
+            </mat-checkbox>
+        }
+    </ng-container>
+
+    <ng-container subheader>
+        @if (isGlobalSearch) {
+            <div class="global-search-subheader">
+                <div class="global-search-controls">
+                    <div class="global-search-filters">
+                        @for (filter of filterConfig; track filter.key) {
+                            <mat-checkbox
+                                [ngModel]="filters()[filter.key]"
+                                (ngModelChange)="
+                                    updateFilter(filter.key, $event)
+                                "
+                            >
+                                {{ filter.translationKey | translate }}
+                            </mat-checkbox>
+                        }
+                    </div>
+                    <div class="global-search-options">
+                        <mat-checkbox
+                            [ngModel]="excludeHidden()"
+                            (ngModelChange)="toggleExcludeHidden($event)"
+                        >
+                            {{
+                                'PORTALS.SEARCH_VIEW.VISIBLE_CATEGORIES_ONLY'
+                                    | translate
+                            }}
+                        </mat-checkbox>
+                        <mat-checkbox
+                            [ngModel]="groupByPlaylist()"
+                            (ngModelChange)="toggleGroupByPlaylist($event)"
+                        >
+                            {{
+                                'PORTALS.SEARCH_VIEW.GROUP_BY_PLAYLIST'
+                                    | translate
+                            }}
+                        </mat-checkbox>
+                    </div>
+                </div>
+            </div>
+        }
+    </ng-container>
+
+    <ng-container results-prefix>
+        <ng-content select="[global-search-prefix]" />
+        @if (
+            isGlobalSearch &&
+            xtreamStore.searchError() &&
+            globalResults().length > 0
+        ) {
+            <div class="global-search-retry">
+                <span role="status">{{
+                    'PORTALS.SEARCH_VIEW.ERROR_TITLE' | translate
+                }}</span>
+                <button type="button" mat-button (click)="executeSearch()">
+                    {{ 'PORTALS.GRID.RETRY' | translate }}
+                </button>
+            </div>
+        }
+    </ng-container>
+
+    <!-- Results -->
+    <ng-container results>
+        @if (isGlobalSearch) {
+            <!-- Global Search Results -->
+            @if (groupByPlaylist()) {
+                <!-- Grouped by playlist -->
+                <div class="playlist-section">
+                    <h2 class="section-title">
+                        {{
+                            'XTREAM.GLOBAL_SEARCH_SUMMARY'
+                                | translate
+                                    : {
+                                          count: globalResults().length,
+                                          playlists: groupedResults().length,
+                                      }
+                        }}
+                    </h2>
+                    @for (group of groupedResults(); track group.playlistId) {
+                        <div class="playlist-group">
+                            <h3 class="playlist-title">
+                                <mat-icon>playlist_play</mat-icon>
+                                {{ group.playlistName }}
+                                <span class="item-count"
+                                    >({{
+                                        (group.items.length === 1
+                                            ? 'WORKSPACE.CONTEXT.ITEM_COUNT_ONE'
+                                            : 'WORKSPACE.CONTEXT.ITEM_COUNT_OTHER'
+                                        )
+                                            | translate
+                                                : { count: group.items.length }
+                                    }})</span
+                                >
+                            </h3>
+                            <div class="results-grid">
+                                @for (item of group.items; track item.id) {
+                                    <app-content-card
+                                        [allowPostersOnly]="false"
+                                        [posterUrl]="
+                                            item.poster_url ?? undefined
+                                        "
+                                        [title]="item.title"
+                                        [type]="getDisplayType(item)"
+                                        [showPlaceholder]="true"
+                                        (cardClick)="selectItem(item)"
+                                    />
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            } @else {
+                <!-- Flat list -->
+                <div class="results-grid">
+                    @for (item of globalResults(); track item.id) {
+                        <app-content-card
+                            [allowPostersOnly]="false"
+                            [posterUrl]="item.poster_url ?? undefined"
+                            [title]="item.title"
+                            [type]="getDisplayType(item)"
+                            [showPlaceholder]="true"
+                            (cardClick)="selectItem(item)"
+                        />
+                    }
+                </div>
+            }
+            @if (isLoadingMoreGlobalResults()) {
+                <div class="global-search-loading-more">
+                    <mat-spinner diameter="18" />
+                    <span>
+                        {{
+                            'PORTALS.SEARCH_VIEW.LOADING_MORE_RESULTS'
+                                | translate
+                        }}
+                    </span>
+                </div>
+            }
+        } @else {
+            <!-- Playlist-level Search Results (windowed; grows via nearEnd) -->
+            <div class="results-grid">
+                @for (item of visibleInPortalResults(); track item.id) {
+                    <app-content-card
+                        [allowPostersOnly]="false"
+                        [posterUrl]="item.poster_url ?? undefined"
+                        [title]="item.title"
+                        [type]="item.type"
+                        [showPlaceholder]="true"
+                        (cardClick)="selectItem(item)"
+                    />
+                }
+            </div>
+        }
+    </ng-container>
+    <ng-container empty>
+        <ng-content select="[global-search-suffix]" />
+    </ng-container>
+</app-search-layout>
