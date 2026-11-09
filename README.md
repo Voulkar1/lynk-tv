@@ -14,7 +14,7 @@ Use only playlists you have the right to watch.
 | LG webOS TV | Same workflow, `lynk-tv-webos` artifact (`.ipk`). Install in Developer Mode. Needs a LYNK TV server on the home network (the Mac app → Settings → Server). |
 | Web | `pnpm nx build web --configuration=pwa && node tools/netlify/build.mjs`, then deploy `dist/netlify` to Netlify. The `/api` function needs the `LYNK_TARGET_KEY` env var (32+ random characters). |
 
-Push a tag such as `v0.25.0-lynk.1` to publish a GitHub Release with all files attached.
+Every push to `main` builds everything and publishes a GitHub Release with the files attached.
 
 ## Credits
 

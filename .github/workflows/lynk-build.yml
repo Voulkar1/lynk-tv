@@ -1,12 +1,12 @@
 name: LYNK TV builds
 
 # Builds the Mac app (Apple Silicon + Intel) and the LG webOS TV package.
-# Run it from the Actions tab ("Run workflow"), or push a tag like v0.25.0-lynk.1
-# to also publish a GitHub Release with the files attached.
+# Runs on every push to main (or from the Actions tab: "Run workflow") and
+# publishes a GitHub Release with the installers attached.
 on:
     workflow_dispatch:
     push:
-        tags: ['v*']
+        branches: [main]
 
 permissions:
     contents: write
@@ -74,7 +74,6 @@ jobs:
 
     release:
         name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         needs: [mac, tv]
         runs-on: ubuntu-latest
         steps:
@@ -84,4 +83,8 @@ jobs:
                   merge-multiple: true
             - uses: softprops/action-gh-release@v2
               with:
+                  tag_name: lynk-build-${{ github.run_number }}
+                  target_commitish: ${{ github.sha }}
+                  name: LYNK TV (build ${{ github.run_number }})
+                  body: Mac (Apple Silicon = arm64, Intel = x64) and LG webOS TV builds. Unsigned Mac app: the first time, right-click it and choose Open.
                   files: out/*
